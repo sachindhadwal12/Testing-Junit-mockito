@@ -1,0 +1,103 @@
+# `EmployeeIntegrationTest` — Full-Context Integration Tests
+
+**File:** `src/test/java/com/example/employee/EmployeeIntegrationTest.java`
+
+## What this test class is
+
+A **full-stack integration test** that wires together the *real* controller, *real* service, and *real* global exception handler in a complete Spring application context — but stops short of an actual database.
+
+- `@SpringBootTest(properties = {...})` starts the **whole** Spring Boot context, so every bean is the genuine production bean and they are all wired together exactly as at runtime.
+- The `spring.autoconfigure.exclude` property switches **off** the JPA/Hibernate/DataSource auto-configuration. This is the trick that lets the context start with **no MySQL connection** — the test runs anywhere, with no DB to install or seed.
+- `@AutoConfigureMockMvc` gives us `MockMvc` to drive real HTTP requests through the full chain.
+- `@MockitoBean EmployeeRepository repository` swaps the **only** layer we can't run without a DB (the JPA repository) for a Mockito mock. Everything *above* it is real.
+
+### How this differs from the other two test classes
+
+| | Layers exercised | DB | Speed |
+|---|---|---|---|
+| `EmployeeServiceTest` | Service only (mock repo) | none | fastest |
+| `EmployeeControllerTest` | Controller only (mock service) | none | fast |
+| **`EmployeeIntegrationTest`** | **Controller → Service → (mock repo)** | none | slower |
+
+The value here: it proves the **real beans actually wire together and collaborate correctly** — request mapping, validation, the service's business rules, *and* the exception handler all working in one pass. The other two tests verify each layer in isolation; this one verifies they fit together.
+
+### Shared fixture
+`alice` (id 1) is rebuilt before each test.
+
+---
+
+## GET endpoints
+
+### `getAll_returnsEmployeesFromRepository`
+- **What:** Mock repo returns `[alice, bob]`. Asserts `200`, array size 2, and that order/names are preserved (`[0]=Alice`, `[1]=Bob`).
+- **Why:** End-to-end confirmation that data from the repository flows through the real service and controller and serializes correctly — exercising the full read path in one shot.
+
+### `getById_returns404ViaGlobalHandler`
+- **What:** Mock repo returns `Optional.empty()` for id 99. Asserts `404` with the full error body (`status`, `message` containing `"99"`, `path`).
+- **Why:** The name says it all — this proves the **real service's not-found check** fires and the **real `GlobalExceptionHandler`** turns it into the documented 404 contract, with all the production beans in the chain (not mocked stand-ins).
+
+---
+
+## POST `/api/employees` (create)
+
+### `create_persistsAndReturns201WithLocation`
+- **What:** Mock repo's `save()` simulates a DB sequence using an `AtomicLong` starting at 100, assigning ids 100, 101, … Asserts `201`, `Location` header containing `/api/employees/100`, and `$.id == 100`.
+- **Why:** Verifies the whole create path: the real service strips the client id, calls save, and the real controller builds the `Location` header from the generated id. The `AtomicLong` realistically mimics a DB auto-increment.
+
+### `create_returns400WhenBeanValidationFails`
+- **What:** Posts a blank/invalid employee. Asserts `400` and `message` containing `"email"`.
+- **Why:** Confirms `@Valid` + Bean Validation + the exception handler all function inside the real context — the request is rejected before reaching the (mock) repository.
+
+---
+
+## PUT `/api/employees/{id}` (full update)
+
+### `put_updatesExistingEmployee`
+- **What:** Mock repo finds `alice` and echoes back whatever is saved. Sends a full update; asserts `200`, id stays `1`, and name/department reflect the new values.
+- **Why:** Exercises the real service's full-replace logic through the HTTP layer: load existing → overwrite mutable fields → save → serialize. Proves identity is preserved while content changes.
+
+---
+
+## PATCH `/api/employees/{id}` (partial update)
+
+### `patch_appliesPartialUpdate`
+- **What:** Mock repo finds `alice`, echoes the save. Patches `{"department":"Platform"}`; asserts `200`, name and email **unchanged**, department updated.
+- **Why:** End-to-end proof that partial-update merge logic (only-touch-supplied-fields) works through the real stack — the most behaviour-rich endpoint, verified in context.
+
+### `patch_returns400ForUnknownField`
+- **What:** Mock repo finds `alice`. Patches `{"salary":100}`; asserts `400` and `message` containing `"salary"`.
+- **Why:** Confirms the real service's field whitelist rejects unknown keys and the handler maps that `IllegalArgumentException` to 400 — all without `@Valid` being applied to PATCH.
+
+---
+
+## DELETE `/api/employees/{id}`
+
+### `delete_returns204AndCallsRepository`
+- **What:** Mock repo's `existsById(1L)` is true. Asserts `204`, then `verify(repository).deleteById(1L)`.
+- **Why:** Confirms the full delete path: controller → service existence check → repository delete. The `verify` proves the call actually reached the data layer through every real bean in between.
+
+### `delete_returns404WhenMissing`
+- **What:** `existsById(99L)` is false. Asserts `404`.
+- **Why:** Missing-resource deletes surface as 404 end-to-end, consistent with the rest of the API.
+
+---
+
+## Key techniques used here
+
+| Technique | Purpose |
+|-----------|---------|
+| `@SpringBootTest` | Start the full application context with real beans. |
+| `spring.autoconfigure.exclude=...` | Disable JPA/DataSource so no real DB is needed. |
+| `@MockitoBean` (repository) | Replace only the data layer; keep everything above real. |
+| `@AutoConfigureMockMvc` | Drive real HTTP requests through the whole chain. |
+| `AtomicLong` in `willAnswer` | Simulate DB auto-increment ID generation. |
+| `verify(repository)...` | Prove a call reached the data layer end-to-end. |
+
+## Why all three test classes exist
+
+These three classes form a deliberate **test pyramid**:
+1. **`EmployeeServiceTest`** — many fast unit tests pin down business logic in isolation.
+2. **`EmployeeControllerTest`** — slice tests verify HTTP/JSON/error mapping without business logic.
+3. **`EmployeeIntegrationTest`** — fewer, slower tests prove the real beans wire and collaborate correctly.
+
+A bug's location is narrowed by *which* layer's tests fail, and none of them require a running MySQL instance.
