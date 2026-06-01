@@ -1,0 +1,114 @@
+# `EmployeeServiceTest` — Unit Tests for the Service Layer
+
+**File:** `src/test/java/com/example/employee/service/EmployeeServiceTest.java`
+
+## What this test class is
+
+A **pure unit test** of `EmployeeService`. No Spring context is started and no database is touched. Instead:
+
+- `@ExtendWith(MockitoExtension.class)` boots Mockito's JUnit 5 integration.
+- `@Mock EmployeeRepository repository` is a fake repository — we tell it what to return.
+- `@InjectMocks EmployeeService service` is the **real** service under test, with the mock repository injected through its constructor.
+
+This isolation means every test here exercises **only the service's own logic** (not-found checks, ID stripping, field whitelisting, partial-update merging) and nothing else. If a test fails, the bug is in the service, not in the web layer or the DB.
+
+### Shared fixture
+```java
+@BeforeEach
+void setUp() {
+    alice = new Employee("Alice", "alice@example.com", "Engineering");
+    alice.setId(1L);
+}
+```
+`alice` is a known, fully-populated employee rebuilt fresh before every test so no test can leak state into another.
+
+Tests are grouped with `@Nested` classes (one per service method) and labelled with `@DisplayName` so the test report reads like a spec.
+
+---
+
+## `getAll()`
+
+### `returnsAllEmployees`
+- **What:** Stubs `repository.findAll()` to return a list containing `alice`, calls `service.getAll()`, asserts the result contains exactly `alice`, and verifies `findAll()` was actually called.
+- **Why:** Confirms the service passes the repository's result straight through without dropping, duplicating, or reordering records. `verify(repository).findAll()` proves the data really came from the repository and wasn't fabricated.
+
+---
+
+## `getById()`
+
+### `returnsEmployeeWhenFound`
+- **What:** Stubs `findById(1L)` to return `alice`; asserts the returned object **is the same instance** (`isSameAs`).
+- **Why:** The happy path — when the record exists, the service returns it unchanged. `isSameAs` (identity, not just equality) proves the service doesn't needlessly copy or transform the entity.
+
+### `throwsWhenMissing`
+- **What:** Stubs `findById(99L)` to return `Optional.empty()`; asserts an `EmployeeNotFoundException` is thrown and its message contains `"99"`.
+- **Why:** This is the not-found contract relied on by both GET-by-id and the global exception handler (which maps it to HTTP 404). Checking the message contains the ID proves the error is specific and useful for debugging, not generic.
+
+---
+
+## `create()`
+
+### `persistsAndReturnsSavedEntity`
+- **What:** Passes a new `Bob` with no ID. The mock `save()` simulates the DB by assigning id `42`. Asserts the returned employee has id `42` and name `Bob`.
+- **Why:** Confirms the service returns the **persisted** entity (the one with a DB-generated ID), which is what the controller needs to build the `Location` header on a `201 Created`.
+
+### `stripsClientSuppliedId`
+- **What:** Passes an `Eve` with a client-set id `999`. Uses an `ArgumentCaptor` to capture the exact `Employee` handed to `repository.save()`, then asserts its id is `null`.
+- **Why:** This is the **defensive anti-upsert guard** described in the architecture notes. A client must never be able to pick its own primary key (which could overwrite another row). The captor lets us inspect what the service actually sent to the DB, proving the id was nulled *before* persistence.
+
+---
+
+## `update()` (full replace via PUT)
+
+### `replacesAllMutableFields`
+- **What:** Existing `alice` is found; `save()` echoes back whatever it's given. Sends a fully-populated `changes` object and asserts **all three** mutable fields (name, email, department) were overwritten while the id stayed `1`.
+- **Why:** PUT semantics are "replace the whole resource." This proves every editable field is updated and the identity (id) is preserved, not regenerated.
+
+### `throwsWhenMissing`
+- **What:** `findById(99L)` returns empty; asserts `EmployeeNotFoundException` and `verify(repository, never()).save(any())`.
+- **Why:** You cannot update a record that doesn't exist. The `never().save()` check is critical — it proves the service **fails fast and writes nothing**, rather than accidentally creating a new row.
+
+---
+
+## `patch()` (partial update via PATCH)
+
+### `updatesOnlyProvidedFields`
+- **What:** Patches only `{"department": "Platform"}`; asserts department changed but name and email kept their original `alice` values.
+- **Why:** PATCH must touch **only** the supplied keys and leave everything else alone. This is the core difference from PUT and the main reason PATCH logic deserves its own tests.
+
+### `ignoresIdField`
+- **What:** Patches `{"id": 555}`; asserts the id is still `1`.
+- **Why:** Same primary-key-protection principle as `create()` — the id is not a client-mutable field even when explicitly supplied in a patch map.
+
+### `rejectsUnknownField`
+- **What:** Patches `{"salary": 100}` (no such field); asserts `IllegalArgumentException` with message containing `"salary"`, and `never().save()`.
+- **Why:** The service whitelists allowed field names. An unknown key is a client error (mapped to HTTP 400), not silently ignored. Naming the offending field in the message makes the API self-explanatory. `never().save()` proves a bad request never reaches the DB.
+
+### `rejectsNonStringValueForStringField`
+- **What:** Patches `{"name": 123}` — a numeric value for a String field; asserts `IllegalArgumentException`.
+- **Why:** Type safety. Even for a *known* field, a wrong value type must be rejected rather than coerced or causing a downstream `ClassCastException`.
+
+---
+
+## `delete()`
+
+### `deletesWhenExists`
+- **What:** Stubs `existsById(1L)` true; calls `delete(1L)`; verifies `deleteById(1L)` was called exactly once.
+- **Why:** Confirms the happy path performs exactly one delete. `times(1)` guards against accidental double-deletes.
+
+### `throwsWhenMissing`
+- **What:** Stubs `existsById(99L)` false; asserts `EmployeeNotFoundException` and `never().deleteById(any())`.
+- **Why:** Deleting a non-existent record should be an explicit 404, not a silent no-op. The `never().deleteById()` check proves the existence check actually gates the delete call.
+
+---
+
+## Key techniques used here
+
+| Technique | Purpose |
+|-----------|---------|
+| `@Mock` / `@InjectMocks` | Isolate the real service with a fake repository. |
+| `when(...).thenReturn/thenAnswer` | Define repository behaviour per test. |
+| `thenAnswer` | Simulate DB side effects (ID assignment, echo-back). |
+| `ArgumentCaptor` | Inspect the exact object passed to the repository. |
+| `verify(..., never())` | Prove a write **did not** happen on error paths. |
+| `assertThatThrownBy` | Assert exception type *and* message in one fluent check. |
