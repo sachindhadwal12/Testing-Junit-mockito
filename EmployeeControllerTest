@@ -1,0 +1,103 @@
+# `EmployeeControllerTest` — Web Layer (MVC) Slice Tests
+
+**File:** `src/test/java/com/example/employee/controller/EmployeeControllerTest.java`
+
+## What this test class is
+
+A **web-layer slice test** using `@WebMvcTest(EmployeeController.class)`. This starts *only* the Spring MVC machinery for `EmployeeController` — request mapping, JSON (de)serialization, validation, and status/header handling — without the service, repository, or database.
+
+- `@WebMvcTest(EmployeeController.class)` loads just the controller and MVC infrastructure (fast, focused).
+- `@Import(GlobalExceptionHandler.class)` pulls the `@RestControllerAdvice` into the slice so we can assert the real error-response shape (status, message, path).
+- `@MockitoBean EmployeeService service` replaces the service with a mock — the controller's collaborator is faked so we test **HTTP behaviour, not business logic**.
+- `MockMvc` performs simulated HTTP requests in-process (no real server/port).
+- `ObjectMapper` builds request JSON from `Employee` objects.
+
+> Note: business rules (ID stripping, field whitelisting, etc.) are **not** retested here — they belong to `EmployeeServiceTest`. Here we verify the controller maps HTTP correctly to/from the service and that exceptions surface as the right status codes.
+
+### Shared fixture
+`alice` (id 1) is rebuilt before each test for a consistent, populated subject.
+
+---
+
+## GET endpoints
+
+### `getAll_returns200WithList`
+- **What:** Service returns `[alice]`. Asserts `200 OK`, JSON array of size 1, and that `name`/`email` serialize correctly.
+- **Why:** Confirms the list endpoint returns 200 and that `Employee` → JSON serialization produces the expected field names and values.
+
+### `getById_returns200WhenFound`
+- **What:** Service returns `alice` for id 1. Asserts `200`, `$.id == 1`, `$.department == "Engineering"`.
+- **Why:** Happy path for single-resource retrieval and correct JSON body mapping.
+
+### `getById_returns404WhenMissing`
+- **What:** Service throws `EmployeeNotFoundException(99)`. Asserts `404`, plus the full `ErrorResponse` body: `status=404`, `error="Not Found"`, `message` contains `"99"`, and `path="/api/employees/99"`.
+- **Why:** This is the key test that the **`GlobalExceptionHandler` is wired in and produces the documented error contract**. It proves a service-thrown domain exception becomes a well-formed 404 JSON response — including the request path, which clients/log tooling rely on.
+
+---
+
+## POST `/api/employees` (create)
+
+### `create_returns201WithLocationHeader`
+- **What:** Service returns a saved `Bob` with id 42. Asserts `201 Created`, a `Location` header containing `/api/employees/42`, and `$.id == 42`.
+- **Why:** Verifies REST creation conventions: the correct status **and** the `Location` header pointing at the new resource (built from the persisted entity's ID).
+
+### `create_returns400WhenValidationFails`
+- **What:** Posts an employee with blank name, invalid email, blank department. Asserts `400`, `status=400`, and `message` containing `"email"`.
+- **Why:** Confirms `@Valid` on the `@RequestBody` triggers Bean Validation, and that `MethodArgumentNotValidException` is translated into a 400 with the offending field surfaced in the message. The service is never even reached.
+
+### `create_returns400WhenJsonMalformed`
+- **What:** Posts the broken body `{not-json`. Asserts `400` and `message == "Malformed JSON request"`.
+- **Why:** Distinguishes a *parse* failure (`HttpMessageNotReadableException`) from a *validation* failure. Both are 400, but the handler gives a clear, distinct message so clients know it's a syntax problem, not a field problem.
+
+### `create_returns409WhenEmailConflicts`
+- **What:** Service throws `DataIntegrityViolationException`. Asserts `409 Conflict`, `status=409`.
+- **Why:** A duplicate email hits the DB unique constraint. This proves that low-level data-integrity violations are mapped to the semantically correct **409 Conflict** rather than a generic 500.
+
+---
+
+## PUT `/api/employees/{id}` (full update)
+
+### `update_returns200WhenSuccessful`
+- **What:** Service returns an updated `Alice Smith`/`Platform`. Asserts `200`, and the JSON reflects the new name and department.
+- **Why:** Happy path for full replacement — request body is deserialized, passed to the service, and the updated entity is serialized back.
+
+### `update_returns404WhenMissing`
+- **What:** Service throws `EmployeeNotFoundException(99)` for id 99. Asserts `404`.
+- **Why:** Updating a missing resource must surface as 404 through the global handler, mirroring the GET-by-id contract.
+
+---
+
+## PATCH `/api/employees/{id}` (partial update)
+
+### `patch_returns200WithPartialUpdate`
+- **What:** Sends raw JSON `{"department":"Platform"}`; service returns the patched entity. Asserts `200` and `$.department == "Platform"`.
+- **Why:** Confirms PATCH accepts a partial JSON body and returns the merged result. (Raw JSON is sent on purpose — PATCH takes a `Map`, not a full `Employee`.)
+
+### `patch_returns400ForUnknownField`
+- **What:** Service throws `IllegalArgumentException("Unknown field: salary")`. Asserts `400` and `message` containing `"salary"`.
+- **Why:** Proves the controller does **not** apply `@Valid` to PATCH (partial bodies would fail `@NotBlank`), yet bad fields are still rejected — the rejection comes from the service and is mapped to 400 by the handler.
+
+---
+
+## DELETE `/api/employees/{id}`
+
+### `delete_returns204`
+- **What:** Service `delete(1L)` does nothing. Asserts `204 No Content`, an **empty body**, and verifies `service.delete(1L)` was invoked.
+- **Why:** Confirms REST delete conventions: 204 with no body, and that the controller actually delegates to the service.
+
+### `delete_returns404WhenMissing`
+- **What:** Service throws `EmployeeNotFoundException(99)`. Asserts `404`.
+- **Why:** Deleting a missing resource is an explicit 404, consistent with the rest of the API.
+
+---
+
+## Key techniques used here
+
+| Technique | Purpose |
+|-----------|---------|
+| `@WebMvcTest` | Load only the controller + MVC layer (fast slice). |
+| `@Import(GlobalExceptionHandler.class)` | Test the real error-mapping advice. |
+| `@MockitoBean` | Replace the service so only HTTP behaviour is tested. |
+| `MockMvc` + `jsonPath` | Drive requests and assert on the JSON response body. |
+| `header().string("Location", ...)` | Verify REST creation headers. |
+| `given(...).willThrow(...)` (BDDMockito) | Simulate service errors to test status mapping. |
